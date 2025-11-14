@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -18,7 +19,10 @@ type Command struct {
 	Frequency int
 }
 
-var commands []Command
+var (
+	commands []Command
+	p        *prompt.Prompt
+)
 
 func loadHistory() {
 	// get path for bash history
@@ -48,6 +52,19 @@ func loadHistory() {
 	sort.Slice(commands, func(i, j int) bool {
 		return commands[i].Frequency > commands[j].Frequency
 	})
+}
+
+func appendHistory(cmd string) {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return
+	}
+	f, _ := os.OpenFile(os.Getenv("HOME")+"/.bash_history",
+		os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
+	if f != nil {
+		defer f.Close()
+		f.WriteString(cmd + "\n")
+	}
 }
 
 func fuzzySearch(input string) []prompt.Suggest {
@@ -82,9 +99,7 @@ func executor(input string) {
 		return
 	}
 
-	if input == "exit" {
-		os.Exit(0)
-	}
+	appendHistory(input)
 
 	cmd := exec.Command("bash", "-c", input)
 	cmd.Stdout = os.Stdout
@@ -93,16 +108,45 @@ func executor(input string) {
 	_ = cmd.Run()
 }
 
+func exitChecker(in string, breakline bool) bool {
+	trim := strings.TrimSpace(in)
+	if trim == "exit" || trim == "quit" {
+		return true
+	}
+	return false
+}
+
+func handleExit() {
+	rawModeOff := exec.Command("/bin/stty", "-raw", "echo")
+	rawModeOff.Stdin = os.Stdin
+	_ = rawModeOff.Run()
+	rawModeOff.Wait()
+}
+
 func main() {
+	defer handleExit()
+
 	loadHistory()
 
 	fmt.Println("🧠 Smart Bash — your history suggestion")
 	fmt.Println("Enter command or 'exit' to leave.")
 
-	p := prompt.New(
+	p = prompt.New(
 		executor,
 		completer,
-		prompt.OptionPrefix(">>>"),
+		prompt.OptionLivePrefix(func() (string, bool) {
+			user := os.Getenv("USER")
+			wd, _ := os.Getwd()
+			host, _ := os.Hostname()
+			home, _ := os.UserHomeDir()
+			if home != "" && strings.HasPrefix(wd, home) {
+				if rel, err := filepath.Rel(home, wd); err == nil {
+					wd = filepath.Join("~", rel)
+				}
+			}
+			return fmt.Sprintf("%s@%s:%s$", user, host, wd), true
+		}),
+		prompt.OptionSetExitCheckerOnInput(exitChecker),
 		prompt.OptionTitle("Smart Bash Fuzzy"),
 		prompt.OptionSuggestionBGColor(prompt.DarkBlue),
 	)
