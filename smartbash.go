@@ -99,6 +99,31 @@ func executor(input string) {
 		return
 	}
 
+	if strings.HasPrefix(input, "cd") {
+		parts := strings.Fields(input)
+		var target string
+		if len(parts) == 1 {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "cd: cannot get home:", err)
+				return
+			}
+			target = home
+		} else {
+			target = parts[1]
+			if strings.HasPrefix(target, "~") {
+				home, _ := os.UserHomeDir()
+				target = filepath.Join(home, strings.TrimPrefix(target, "~"))
+			}
+		}
+		if err := os.Chdir(target); err != nil {
+			fmt.Fprintln(os.Stderr, "cd:", err)
+		} else {
+			appendHistory(input)
+		}
+		return
+	}
+
 	appendHistory(input)
 
 	cmd := exec.Command("bash", "-c", input)
@@ -108,12 +133,25 @@ func executor(input string) {
 	_ = cmd.Run()
 }
 
-func exitChecker(in string, breakline bool) bool {
+func exitChecker(in string, breakLine bool) bool {
 	trim := strings.TrimSpace(in)
 	if trim == "exit" || trim == "quit" {
 		return true
 	}
 	return false
+}
+
+func livePrefix() (string, bool) {
+	user := os.Getenv("USER")
+	wd, _ := os.Getwd()
+	host, _ := os.Hostname()
+	home, _ := os.UserHomeDir()
+	if home != "" && strings.HasPrefix(wd, home) {
+		if rel, err := filepath.Rel(home, wd); err == nil {
+			wd = filepath.Join("~", rel)
+		}
+	}
+	return fmt.Sprintf("%s@%s:%s$", user, host, wd), true
 }
 
 func handleExit() {
@@ -134,18 +172,7 @@ func main() {
 	p = prompt.New(
 		executor,
 		completer,
-		prompt.OptionLivePrefix(func() (string, bool) {
-			user := os.Getenv("USER")
-			wd, _ := os.Getwd()
-			host, _ := os.Hostname()
-			home, _ := os.UserHomeDir()
-			if home != "" && strings.HasPrefix(wd, home) {
-				if rel, err := filepath.Rel(home, wd); err == nil {
-					wd = filepath.Join("~", rel)
-				}
-			}
-			return fmt.Sprintf("%s@%s:%s$", user, host, wd), true
-		}),
+		prompt.OptionLivePrefix(livePrefix),
 		prompt.OptionSetExitCheckerOnInput(exitChecker),
 		prompt.OptionTitle("Smart Bash Fuzzy"),
 		prompt.OptionSuggestionBGColor(prompt.DarkBlue),
