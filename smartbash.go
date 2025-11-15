@@ -21,37 +21,32 @@ type Command struct {
 
 var (
 	commands []Command
-	p        *prompt.Prompt
+	freqMap  = map[string]int{}
 )
+
+// ------------------------------------------
+// HISTORY + CACHE
+// ------------------------------------------
 
 func loadHistory() {
 	// get path for bash history
-	path := os.Getenv("HOME") + "/.bash_history"
-	data, err := os.Open(path)
+	path := filepath.Join(os.Getenv("HOME"), ".bash_history")
+	f, err := os.Open(path)
 	if err != nil {
 		return
 	}
-	defer data.Close()
+	defer f.Close()
 
-	// read history file line by line
-	freq := make(map[string]int)
-	scanner := bufio.NewScanner(data)
+	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" {
-			freq[line]++
+		cmd := strings.TrimSpace(scanner.Text())
+		if cmd == "" {
+			continue
 		}
+		freqMap[cmd]++
 	}
 
-	// convert map to slice of Command structs
-	for cmd, count := range freq {
-		commands = append(commands, Command{Text: cmd, Frequency: count})
-	}
-
-	// sort commands by frequency
-	sort.Slice(commands, func(i, j int) bool {
-		return commands[i].Frequency > commands[j].Frequency
-	})
+	rebuildCache()
 }
 
 func appendHistory(cmd string) {
@@ -65,6 +60,164 @@ func appendHistory(cmd string) {
 		defer f.Close()
 		f.WriteString(cmd + "\n")
 	}
+
+	// append to cache
+	freqMap[cmd]++
+	rebuildCache()
+}
+
+func rebuildCache() {
+	commands = commands[:0]
+	for c, f := range freqMap {
+		commands = append(commands, Command{Text: c, Frequency: f})
+	}
+	sort.Slice(commands, func(i, j int) bool {
+		return commands[i].Frequency > commands[j].Frequency
+	})
+}
+
+// ------------------------------------------
+// PATH COMPLETION
+// ------------------------------------------
+
+// expands leading "~" to actual home dir
+func expandHome(p string) string {
+	if strings.HasPrefix(p, "~") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, strings.TrimPrefix(p, "~"))
+		}
+	}
+	return p
+}
+
+// build suggestions for paths. `rawToken` is what user currently typed for the path (may contain ~).
+// `prefixBeforeToken` is the part of the command before the token (e.g. "cd " or "git add ").
+func pathSuggestions(prefixBeforeToken, rawToken string) []prompt.Suggest {
+	expanded := expandHome(rawToken)
+	// if empty token -> list current dir
+	if expanded == "" {
+		expanded = "."
+	}
+
+	dir := expanded
+
+	// if path ends with slash, we list that directory contents
+	if strings.HasSuffix(expanded, string(os.PathSeparator)) {
+		dir = expanded
+	} else {
+		dir = filepath.Dir(expanded)
+	}
+
+	// if dir is empty or ".", set to "."
+	if dir == "" {
+		dir = "."
+	}
+
+	// try to read directory
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		// return nothing if can't read
+		return nil
+	}
+
+	// extract the filter prefix (characters after last /)
+	var filterPrefix string
+	if !strings.HasSuffix(expanded, string(os.PathSeparator)) {
+		filterPrefix = filepath.Base(expanded)
+	}
+
+	var suggests []prompt.Suggest
+	for _, e := range entries {
+		name := e.Name()
+
+		// filter by prefix if it exists
+		if filterPrefix != "" && !strings.HasPrefix(name, filterPrefix) {
+			continue
+		}
+
+		full := filepath.Join(dir, name)
+
+		// restore leading ~ if original used it
+		display := full
+		if strings.HasPrefix(rawToken, "~") {
+			if home, err := os.UserHomeDir(); err == nil {
+				if strings.HasPrefix(full, home) {
+					display = filepath.Join("~", strings.TrimPrefix(full, home))
+				}
+			}
+		}
+		// if entry is dir -> append slash to hint
+		if e.IsDir() {
+			display = display + string(os.PathSeparator)
+			full = full + string(os.PathSeparator)
+		}
+		// Build the full command line suggestion: prefixBeforeToken + display
+		suggestText := strings.TrimRight(prefixBeforeToken, "") + display
+		suggests = append(suggests, prompt.Suggest{Text: suggestText, Description: full})
+	}
+
+	return suggests
+}
+
+// returns the part of the line up to (but not including) the token that should be completed
+// and the token itself.
+func splitLineLastToken(line string) (prefixBeforeToken, token string) {
+	// we will split by spaces, but preserve everything before the last token (including trailing spaces)
+	if strings.TrimSpace(line) == "" {
+		return "", ""
+	}
+	// find last space
+	i := strings.LastIndex(line, " ")
+	if i == -1 {
+		return "", line
+	}
+	prefix := line[:i+1] // include the space
+	token = line[i+1:]
+
+	// If token is a path, extract path part from prefix
+	if isPathToken(token) {
+		// Find last space in prefix to get the actual path prefix
+		parts := strings.Fields(prefix)
+		if len(parts) > 0 && isPathToken(parts[len(parts)-1]) {
+			// Last part of prefix is a path, keep it with space
+			lastPathIdx := strings.LastIndex(prefix[:len(prefix)-1], " ")
+			if lastPathIdx == -1 {
+				return "", token
+			}
+			return prefix[lastPathIdx+1:], token
+		}
+		return "", token
+	}
+	return "", token
+}
+
+func isPathToken(tok string) bool {
+	return strings.Contains(tok, "/") ||
+		strings.HasPrefix(tok, "~") ||
+		strings.HasPrefix(tok, ".")
+}
+
+// ------------------------------------------
+// COMPLETER
+// ------------------------------------------
+
+func completer(d prompt.Document) []prompt.Suggest {
+
+	line := d.TextBeforeCursor()
+	if strings.TrimSpace(line) == "" {
+		return nil
+	}
+
+	prefix, token := splitLineLastToken(line)
+	trim := strings.TrimSpace(line)
+
+	// GENERAL PATH COMPLETION (FOR ANY COMMAND)
+	if isPathToken(token) {
+		return pathSuggestions(prefix, token)
+	}
+
+	// FUZZY HISTORY COMPLETION
+	return fuzzySearch(trim)
 }
 
 func fuzzySearch(input string) []prompt.Suggest {
@@ -84,17 +237,12 @@ func fuzzySearch(input string) []prompt.Suggest {
 	return suggestion
 }
 
-func completer(d prompt.Document) []prompt.Suggest {
-	text := strings.TrimSpace(d.TextBeforeCursor())
-	if text == "" {
-		return nil
-	}
-	return fuzzySearch(text)
-}
+// ------------------------------------------
+// EXECUTOR
+// ------------------------------------------
 
 func executor(input string) {
 	input = strings.TrimSpace(input)
-
 	if input == "" {
 		return
 	}
@@ -102,25 +250,20 @@ func executor(input string) {
 	if strings.HasPrefix(input, "cd") {
 		parts := strings.Fields(input)
 		var target string
+
 		if len(parts) == 1 {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "cd: cannot get home:", err)
-				return
-			}
+			home, _ := os.UserHomeDir()
 			target = home
 		} else {
-			target = parts[1]
-			if strings.HasPrefix(target, "~") {
-				home, _ := os.UserHomeDir()
-				target = filepath.Join(home, strings.TrimPrefix(target, "~"))
-			}
+			target = expandHome(parts[1])
 		}
+
 		if err := os.Chdir(target); err != nil {
-			fmt.Fprintln(os.Stderr, "cd:", err)
-		} else {
-			appendHistory(input)
+			fmt.Println("cd:", err)
+			return
 		}
+
+		appendHistory(input)
 		return
 	}
 
@@ -169,7 +312,7 @@ func main() {
 	fmt.Println("🧠 Smart Bash — your history suggestion")
 	fmt.Println("Enter command or 'exit' to leave.")
 
-	p = prompt.New(
+	p := prompt.New(
 		executor,
 		completer,
 		prompt.OptionLivePrefix(livePrefix),
