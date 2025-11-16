@@ -209,7 +209,6 @@ func completer(d prompt.Document) []prompt.Suggest {
 	}
 
 	prefix, token := splitLineLastToken(line)
-	trim := strings.TrimSpace(line)
 
 	// GENERAL PATH COMPLETION (FOR ANY COMMAND)
 	if isPathToken(token) {
@@ -217,7 +216,7 @@ func completer(d prompt.Document) []prompt.Suggest {
 	}
 
 	// FUZZY HISTORY COMPLETION
-	return fuzzySearch(trim)
+	return fuzzySearch(line)
 }
 
 func fuzzySearch(input string) []prompt.Suggest {
@@ -226,12 +225,26 @@ func fuzzySearch(input string) []prompt.Suggest {
 		texts = append(texts, c.Text)
 	}
 
+	// find prefix
+	var prefix = ""
+	i := strings.LastIndex(input, " ")
+	if i != -1 {
+		prefix = input[:i+1]
+	}
+
 	matches := fuzzy.Find(input, texts)
 	var suggestion []prompt.Suggest
 	for _, m := range matches {
+		var suffix string
+		if prefix != "" && strings.HasPrefix(m.Str, prefix) {
+			suffix = strings.TrimPrefix(m.Str, prefix)
+		} else {
+			// if command doesn't start from current suffix, them insert full command
+			suffix = m.Str
+		}
 		suggestion = append(suggestion, prompt.Suggest{
-			Text:        m.Str,
-			Description: fmt.Sprintf("used %d times", commands[m.Index].Frequency),
+			Text:        suffix,
+			Description: m.Str,
 		})
 	}
 	return suggestion
@@ -276,13 +289,9 @@ func executor(input string) {
 	_ = cmd.Run()
 }
 
-func exitChecker(in string, breakLine bool) bool {
-	trim := strings.TrimSpace(in)
-	if trim == "exit" || trim == "quit" {
-		return true
-	}
-	return false
-}
+// ------------------------------------------
+// ADDITIONS
+// ------------------------------------------
 
 func livePrefix() (string, bool) {
 	user := os.Getenv("USER")
@@ -304,6 +313,14 @@ func handleExit() {
 	rawModeOff.Wait()
 }
 
+func exitChecker(in string, breakLine bool) bool {
+	trim := strings.TrimSpace(in)
+	if trim == "exit" || trim == "quit" {
+		return true
+	}
+	return false
+}
+
 func main() {
 	defer handleExit()
 
@@ -319,6 +336,8 @@ func main() {
 		prompt.OptionSetExitCheckerOnInput(exitChecker),
 		prompt.OptionTitle("Smart Bash Fuzzy"),
 		prompt.OptionSuggestionBGColor(prompt.DarkBlue),
+		prompt.OptionDescriptionBGColor(prompt.DarkGray),
+		prompt.OptionDescriptionTextColor(prompt.White),
 	)
 
 	p.Run()
