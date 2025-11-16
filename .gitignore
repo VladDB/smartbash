@@ -24,4 +24,5 @@ go.work.sum
 # env file
 .env
 
-/orchestrator_assets/logs
+/dist
+/packaging
