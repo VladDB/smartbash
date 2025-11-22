@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/c-bata/go-prompt"
 	"github.com/sahilm/fuzzy"
@@ -283,9 +284,9 @@ func executor(input string) {
 	appendHistory(input)
 
 	cmd := exec.Command("bash", "-c", input)
+	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin
 	_ = cmd.Run()
 }
 
@@ -303,10 +304,10 @@ func livePrefix() (string, bool) {
 			wd = filepath.Join("~", rel)
 		}
 	}
-	return fmt.Sprintf("%s@%s:%s$", user, host, wd), true
+	return fmt.Sprintf("%s@%s:%s$ ", user, host, wd), true
 }
 
-func handleExit() {
+func restoreTerminal() {
 	rawModeOff := exec.Command("/bin/stty", "-raw", "echo")
 	rawModeOff.Stdin = os.Stdin
 	_ = rawModeOff.Run()
@@ -315,19 +316,20 @@ func handleExit() {
 
 func exitChecker(in string, breakLine bool) bool {
 	trim := strings.TrimSpace(in)
-	if trim == "exit" || trim == "quit" {
-		return true
-	}
-	return false
+	return trim == "quit"
 }
 
 func main() {
-	defer handleExit()
+	defer func() {
+		restoreTerminal()
+		time.Sleep(50 * time.Millisecond)
+		fmt.Println()
+	}()
 
 	loadHistory()
 
-	fmt.Println("🧠 Smart Bash — your history suggestion")
-	fmt.Println("Enter command or 'exit' to leave.")
+	fmt.Println("Smart Bash — your history suggestion")
+	fmt.Println("Enter command or 'quit' to leave.")
 
 	p := prompt.New(
 		executor,
